@@ -1,19 +1,15 @@
 (function initGeminiOps(){
   const S = {
     promptInput: [
-      'textarea[aria-label*="Gemini"]',
-      'textarea[placeholder*="Gemini"]',
-      'div[contenteditable="true"]'
+      'div.ql-editor[contenteditable="true"][role="textbox"]',
+      '[contenteditable="true"][aria-label*="Gemini"]',
+      '[contenteditable="true"][data-placeholder*="Gemini"]',
+      'div[contenteditable="true"][role="textbox"]'
     ],
     sendBtn: [
       'button[aria-label*="发送"]',
       'button[aria-label*="Send"]',
       'button:has-text("发送")'
-    ],
-    imageToggle: [
-      'button:has-text("图片")',
-      'button:has-text("生成图片")',
-      '[role="button"]:has-text("Image")'
     ],
     modelBtn: [
       'button:has-text("Gemini")',
@@ -74,7 +70,6 @@
     return {
       promptInput: !!find('promptInput'),
       sendBtn: !!find('sendBtn'),
-      imageToggle: !!find('imageToggle'),
       modelBtn: !!find('modelBtn')
     };
   }
