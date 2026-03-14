@@ -12,6 +12,7 @@ description: 通过 Gemini 官网（gemini.google.com）执行问答与生图操
 3. 文本问答任务（如"问问Gemini xxx"）走 Gemini 文本提问链路。
 4. 默认模型：可用列表中最强模型，优先 `Gemini 3.1 Pro`。
 5. 执行生图后先向用户回报"正在绘图中"，完成后回传图片。
+6. **禁止使用浏览器截图（screenshot）获取生成图片**。默认通过右键图片另存为（Save Image As）保存到本地后发送给用户；仅当用户明确要求高清/原图时，才调用 `downloadLatestImage()` 走原图下载流程。
 
 ## 任务分流
 
@@ -50,13 +51,16 @@ Gemini 页面的操作按钮（`.send-button-container` 内）通过 `aria-label
 5. 发送后立即通知用户：正在绘图中。
 6. **分段轮询等待**（见下方"CDP 保活轮询策略"，生图超时上限 120s）。
 7. 结果出现后，调用 `GeminiOps.getLatestImage()` 获取最新生成的图片（Gemini 一次只生成一张）：
-   - 返回 `{ok, src, alt, width, height, hasDownloadBtn}`。
+   - 返回 `{ok, src, alt, width, height, hasDownloadBtn, debug}`。
    - 定位依据：`<img class="image loaded">` — 只有同时具有 `image` 和 `loaded` 两个 class 的才是已渲染完成的生成图片；DOM 中取最后一个即为最新。
    - `src` 为 `https://lh3.googleusercontent.com/...` 格式的原图 URL。
    - 若 `ok === false`，等几秒再调一次；连续两次失败则做 snapshot 排查页面状态。
-   - 若 `hasDownloadBtn: true`，可调用 `GeminiOps.downloadLatestImage()` 点击原图下载按钮。
+   - **默认**：通过 `src` URL 右键另存为（Save Image As）保存图片到本地，然后发送给用户。
+   - **高清**：仅当用户明确要求高清/原图时，才调用 `GeminiOps.downloadLatestImage()` 走原图下载按钮流程。
    - 下载按钮定位：从 `img` 向上找到 `.image-container` 容器，容器内的 `mat-icon[fonticon="download"]` 即为下载原图按钮。
-8. 把图片返回用户。
+   - ⚠️ **严禁使用浏览器截图（screenshot）代替保存图片**。
+8. 将保存到本地的图片文件发送给用户。
+9. **将每步操作返回的 `debug` 日志一并回传给用户**，方便排查定位失败和优化策略。所有函数（`probe`、`click`、`fillPrompt`、`pollStatus`、`getLatestImage`、`downloadLatestImage`）的返回值都包含 `debug` 字段。
 
 ## CDP 保活轮询策略
 

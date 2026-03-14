@@ -22,6 +22,24 @@
     ]
   };
 
+  /* ── Debug 日志系统 ── */
+  var _log = [];
+  var _MAX_LOG = 200;
+
+  function _d(fn, step, ok, detail){
+    var entry = {ts:Date.now(), fn:fn, step:step, ok:ok};
+    if(detail!==undefined) entry.detail=detail;
+    _log.push(entry);
+    if(_log.length>_MAX_LOG) _log.splice(0, _log.length-_MAX_LOG);
+  }
+
+  /** 取出并清空日志 */
+  function _flush(){
+    var out=_log.slice();
+    _log=[];
+    return out;
+  }
+
   function visible(el){
     if(!el) return false;
     const r=el.getBoundingClientRect();
@@ -44,40 +62,66 @@
   function find(key){
     for(const s of (S[key]||[])){
       const el=q(s);
-      if(el) return el;
+      if(el){
+        _d('find','matched',true,{key:key,selector:s});
+        return el;
+      }
     }
+    _d('find','no_match',false,{key:key,tried:S[key]||[]});
     return null;
   }
 
   function click(key){
+    _d('click','start',true,{key:key});
     const el=find(key);
-    if(!el) return {ok:false,key,error:'not_found'};
+    if(!el){
+      _d('click','element_not_found',false,{key:key});
+      return {ok:false,key,error:'not_found',debug:_flush()};
+    }
     el.click();
-    return {ok:true,key};
+    _d('click','clicked',true,{key:key});
+    return {ok:true,key,debug:_flush()};
   }
 
   function fillPrompt(text){
+    _d('fillPrompt','start',true,{textLen:text.length});
     const el=find('promptInput');
-    if(!el) return {ok:false,error:'prompt_not_found'};
+    if(!el){
+      _d('fillPrompt','input_not_found',false);
+      return {ok:false,error:'prompt_not_found',debug:_flush()};
+    }
+    _d('fillPrompt','input_found',true,{tag:el.tagName});
     el.focus();
     if(el.tagName==='TEXTAREA'){
       el.value=text;
       el.dispatchEvent(new Event('input',{bubbles:true}));
+      _d('fillPrompt','set_textarea',true);
     }else{
       document.execCommand('selectAll',false,null);
       document.execCommand('insertText',false,text);
       el.dispatchEvent(new Event('input',{bubbles:true}));
+      _d('fillPrompt','exec_insertText',true);
     }
-    return {ok:true};
+    return {ok:true,debug:_flush()};
   }
 
   function getStatus(){
     const btn=find('actionBtn');
-    if(!btn) return {status:'unknown',error:'btn_not_found'};
+    if(!btn){
+      _d('getStatus','btn_not_found',false);
+      return {status:'unknown',error:'btn_not_found'};
+    }
     const label=(btn.getAttribute('aria-label')||'').trim();
     const disabled=btn.getAttribute('aria-disabled')==='true';
-    if(/停止|Stop/i.test(label)) return {status:'loading',label};
-    if(/发送|Send|Submit/i.test(label)) return {status:'ready',label,disabled};
+    if(/停止|Stop/i.test(label)){
+      _d('getStatus','detected',true,{status:'loading',label:label});
+      return {status:'loading',label};
+    }
+    if(/发送|Send|Submit/i.test(label)){
+      _d('getStatus','detected',true,{status:'ready',label:label,disabled:disabled});
+      return {status:'ready',label,disabled};
+    }
+    _d('getStatus','detected',true,{status:'idle',label:label,disabled:disabled});
     return {status:'idle',label,disabled};
   }
 
@@ -88,8 +132,8 @@
    */
   function pollStatus(){
     var s=getStatus();
-    // 顺便返回页面可见性，帮助调用端判断 tab 是否还活着
-    return {status:s.status, label:s.label, pageVisible:!document.hidden, ts:Date.now()};
+    _d('pollStatus','polled',true,{status:s.status});
+    return {status:s.status, label:s.label, pageVisible:!document.hidden, ts:Date.now(), debug:_flush()};
   }
 
   /* ── 最新图片获取与下载 ──
@@ -125,44 +169,72 @@
 
   /** 获取最新生成的一张图片信息（DOM 中最后一个 img.image.loaded） */
   function getLatestImage(){
+    _d('getLatestImage','start',true);
     var imgs=[...document.querySelectorAll('img.image.loaded')];
-    if(!imgs.length) return {ok:false, error:'no_loaded_images'};
+    _d('getLatestImage','query_imgs',true,{totalFound:imgs.length});
+    if(!imgs.length){
+      _d('getLatestImage','no_images',false);
+      return {ok:false, error:'no_loaded_images', debug:_flush()};
+    }
     var img=imgs[imgs.length-1];
+    _d('getLatestImage','picked_latest',true,{index:imgs.length-1, src:(img.src||'').slice(0,80)});
     var container=_findContainer(img);
+    _d('getLatestImage','find_container',!!container);
     var dlBtn=_findDownloadBtn(container);
+    _d('getLatestImage','find_download_btn',!!dlBtn);
     return {
       ok: true,
       src: img.src||'',
       alt: img.alt||'',
       width: img.naturalWidth||0,
       height: img.naturalHeight||0,
-      hasDownloadBtn: !!dlBtn
+      hasDownloadBtn: !!dlBtn,
+      debug: _flush()
     };
   }
 
   /** 点击最新图片的"下载原图"按钮 */
   function downloadLatestImage(){
+    _d('downloadLatestImage','start',true);
     var imgs=[...document.querySelectorAll('img.image.loaded')];
-    if(!imgs.length) return {ok:false, error:'no_loaded_images'};
+    _d('downloadLatestImage','query_imgs',true,{totalFound:imgs.length});
+    if(!imgs.length){
+      _d('downloadLatestImage','no_images',false);
+      return {ok:false, error:'no_loaded_images', debug:_flush()};
+    }
     var img=imgs[imgs.length-1];
     var container=_findContainer(img);
+    _d('downloadLatestImage','find_container',!!container);
     var dlBtn=_findDownloadBtn(container);
-    if(!dlBtn) return {ok:false, error:'download_btn_not_found'};
+    if(!dlBtn){
+      _d('downloadLatestImage','download_btn_not_found',false);
+      return {ok:false, error:'download_btn_not_found', debug:_flush()};
+    }
+    _d('downloadLatestImage','find_download_btn',true);
     var clickable=dlBtn.closest('button,[role="button"],.button-icon-wrapper')||dlBtn;
     clickable.click();
-    return {ok:true, src:img.src||''};
+    _d('downloadLatestImage','clicked',true,{clickedTag:clickable.tagName});
+    return {ok:true, src:img.src||'', debug:_flush()};
   }
 
   function probe(){
+    _d('probe','start',true);
     var s=getStatus();
-    return {
+    var result={
       promptInput: !!find('promptInput'),
       actionBtn: !!find('actionBtn'),
       newChatBtn: !!find('newChatBtn'),
       modelBtn: !!find('modelBtn'),
-      status: s.status
+      status: s.status,
+      debug: _flush()
     };
+    return result;
   }
 
-  window.GeminiOps = {probe, click, fillPrompt, getStatus, pollStatus, getLatestImage, downloadLatestImage, selectors:S, version:'0.7.0'};
+  /** 获取完整调试日志（不清空） */
+  function getDebugLog(){
+    return {log:_log.slice(), count:_log.length};
+  }
+
+  window.GeminiOps = {probe, click, fillPrompt, getStatus, pollStatus, getLatestImage, downloadLatestImage, getDebugLog, selectors:S, version:'0.8.0'};
 })();

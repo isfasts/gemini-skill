@@ -37,6 +37,10 @@
 
 ## 4) 生图结果获取
 
+> ⚠️ **严禁使用浏览器截图（screenshot）获取生成图片。**
+> - **默认流程**：通过 `src` URL 右键另存为（Save Image As）保存到本地，再发送给用户。
+> - **高清流程**：仅当用户明确要求高清/原图时，才调用 `downloadLatestImage()` 点击原图下载按钮。
+
 Gemini 一次只生成一张图片，流程上只关心**最新生成的那张**，历史图片不做处理。
 
 调用 `GeminiOps.getLatestImage()` 获取最新一张生成图片。
@@ -70,6 +74,8 @@ Gemini 一次只生成一张图片，流程上只关心**最新生成的那张**
 
 ### API
 
+所有操作函数的返回值都包含 `debug` 字段，记录该次调用每一步的日志（含时间戳、步骤名、成功/失败、上下文详情），方便排查问题和改进策略。
+
 - `GeminiOps.getLatestImage()` → 获取最新一张图片信息
 
 ```json
@@ -79,21 +85,64 @@ Gemini 一次只生成一张图片，流程上只关心**最新生成的那张**
   "alt": "AI 生成",
   "width": 1024,
   "height": 1024,
-  "hasDownloadBtn": true
+  "hasDownloadBtn": true,
+  "debug": [
+    {"ts": 1710000000000, "fn": "getLatestImage", "step": "start", "ok": true},
+    {"ts": 1710000000001, "fn": "getLatestImage", "step": "query_imgs", "ok": true, "detail": {"totalFound": 1}},
+    {"ts": 1710000000002, "fn": "getLatestImage", "step": "picked_latest", "ok": true, "detail": {"index": 0, "src": "https://lh3.google..."}},
+    {"ts": 1710000000003, "fn": "getLatestImage", "step": "find_container", "ok": true},
+    {"ts": 1710000000004, "fn": "getLatestImage", "step": "find_download_btn", "ok": true}
+  ]
 }
 ```
 
 - `GeminiOps.downloadLatestImage()` → 点击最新图片的下载原图按钮
 
 ```json
-{"ok": true, "src": "https://lh3.googleusercontent.com/..."}
+{"ok": true, "src": "https://lh3.googleusercontent.com/...", "debug": [...]}
 ```
+
+- `GeminiOps.probe()` / `click()` / `fillPrompt()` / `pollStatus()` → 同样携带 `debug` 字段
+
+- `GeminiOps.getDebugLog()` → 获取完整累积日志（不清空），用于事后排查
+
+```json
+{"log": [...], "count": 15}
+```
+
+### debug 日志格式
+
+每条日志条目：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `ts` | number | 毫秒级时间戳 |
+| `fn` | string | 函数名，如 `click`、`getLatestImage` |
+| `step` | string | 步骤名，如 `start`、`find_container`、`clicked` |
+| `ok` | boolean | 该步骤是否成功 |
+| `detail` | object? | 可选，上下文信息（匹配的选择器、找到的元素数量等） |
+
+调用端应将 `debug` 数组回传给用户，便于分析定位失败原因和优化选择器策略。
+```
+
+### 图片交付流程（重要）
+
+**默认流程（右键另存）：**
+1. 调用 `GeminiOps.getLatestImage()` 确认图片已渲染完成
+2. 通过返回的 `src` URL，右键图片另存为（Save Image As）保存到本地
+3. 将本地图片文件发送给用户
+
+**高清流程（仅用户要求时）：**
+1. 调用 `GeminiOps.getLatestImage()` 确认图片已渲染完成
+2. 调用 `GeminiOps.downloadLatestImage()` 点击原图下载按钮
+3. 将下载到本地的高清原图文件发送给用户
+
+> **严禁**在任何环节使用浏览器截图（screenshot）代替保存图片。
 
 ### 回退
 
 - `ok === false` → 页面可能还在渲染，等几秒再调一次
-- 连续两次失败 → 做 snapshot 排查页面状态
-- `hasDownloadBtn: false` → 回退到直接用 `src` URL 下载
+- 连续两次失败 → 做 snapshot 排查页面状态（snapshot 仅用于排查，不用于交付图片）
 
 ## 5) 用户提示文案（建议）
 
