@@ -96,11 +96,36 @@ Gemini 一次只生成一张图片，流程上只关心**最新生成的那张**
 }
 ```
 
-- `GeminiOps.downloadLatestImage()` → 点击最新图片的下载原图按钮
+- `GeminiOps.downloadLatestImage()` → 点击最新图片的下载原图按钮（仅用户要求高清时）
 
 ```json
 {"ok": true, "src": "https://lh3.googleusercontent.com/...", "debug": [...]}
 ```
+
+- `GeminiOps.extractImageBase64()` → **默认图片获取方式**，从 DOM 直接提取 Base64
+
+```json
+{
+  "ok": true,
+  "dataUrl": "data:image/png;base64,iVBORw0KGgo...",
+  "width": 1024,
+  "height": 1024,
+  "method": "canvas",
+  "debug": [...]
+}
+```
+
+  提取策略（自动选择，无需调用端干预）：
+  1. **Canvas 提取**（优先）：将已渲染的 `<img>` 绘制到虚拟 Canvas，同步导出 `toDataURL('image/png')`。零网络请求，毫秒级完成。`method` 返回 `"canvas"`。
+  2. **Fetch fallback**：若 Canvas 因跨域 tainted 而报错，自动回退到页面内 `fetch(img.src)` → `blob` → `FileReader.readAsDataURL()`。`method` 返回 `"fetch"`。
+
+  > ⚠️ 该函数返回 **Promise**。CDP 调用时必须设置 `awaitPromise: true`：
+  > ```js
+  > // CDP Runtime.evaluate 示例
+  > { expression: "GeminiOps.extractImageBase64()", awaitPromise: true, returnByValue: true }
+  > ```
+
+  调用端拿到 `dataUrl` 后，去掉 `data:image/png;base64,` 前缀，解码为二进制存为 `.png` 文件即可。
 
 - `GeminiOps.probe()` / `click()` / `fillPrompt()` / `pollStatus()` → 同样携带 `debug` 字段
 
@@ -127,10 +152,11 @@ Gemini 一次只生成一张图片，流程上只关心**最新生成的那张**
 
 ### 图片交付流程（重要）
 
-**默认流程（右键另存）：**
-1. 调用 `GeminiOps.getLatestImage()` 确认图片已渲染完成
-2. 通过返回的 `src` URL，右键图片另存为（Save Image As）保存到本地
-3. 将本地图片文件发送给用户
+**默认流程（Base64 提取）：**
+1. 调用 `GeminiOps.getLatestImage()` 确认图片已渲染完成（`ok: true`）
+2. 调用 `GeminiOps.extractImageBase64()` 提取图片数据（需 `awaitPromise: true`）
+3. 去掉 `dataUrl` 的 `data:image/png;base64,` 前缀，解码为二进制，保存为 `.png` 文件
+4. 将本地图片文件发送给用户
 
 **高清流程（仅用户要求时）：**
 1. 调用 `GeminiOps.getLatestImage()` 确认图片已渲染完成

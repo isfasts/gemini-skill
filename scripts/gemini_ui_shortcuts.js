@@ -193,7 +193,7 @@
     };
   }
 
-  /** 点击最新图片的"下载原图"按钮 */
+  /** 点击最新图片的"下载原图"按钮（仅用户要求高清时调用） */
   function downloadLatestImage(){
     _d('downloadLatestImage','start',true);
     var imgs=[...document.querySelectorAll('img.image.loaded')];
@@ -217,6 +217,70 @@
     return {ok:true, src:img.src||'', debug:_flush()};
   }
 
+  /* ── 图片 Base64 提取 ──
+   * 默认获取图片的方式。直接从已渲染的 DOM 提取，不走网络请求，不触发下载对话框。
+   *
+   * 策略：
+   *   1. Canvas 提取（同步，零网络，最快）
+   *   2. 若 Canvas 被 tainted（跨域污染），fallback 到页面内 fetch → blob → Base64
+   *
+   * 返回 data:image/png;base64,... 格式字符串，调用端直接解码存文件即可。
+   * 注意：fetch fallback 是异步的，因此本函数返回 Promise。
+   *       调用端需用 CDP Runtime.evaluate + awaitPromise:true 来获取结果。
+   */
+  function extractImageBase64(){
+    _d('extractImageBase64','start',true);
+    var imgs=[...document.querySelectorAll('img.image.loaded')];
+    _d('extractImageBase64','query_imgs',true,{totalFound:imgs.length});
+    if(!imgs.length){
+      _d('extractImageBase64','no_images',false);
+      var dbg=_flush();
+      return Promise.resolve({ok:false, error:'no_loaded_images', debug:dbg});
+    }
+    var img=imgs[imgs.length-1];
+    var w=img.naturalWidth||img.width;
+    var h=img.naturalHeight||img.height;
+    _d('extractImageBase64','picked_latest',true,{index:imgs.length-1, w:w, h:h, src:(img.src||'').slice(0,80)});
+
+    // 尝试 Canvas 同步提取
+    try{
+      var canvas=document.createElement('canvas');
+      canvas.width=w;
+      canvas.height=h;
+      var ctx=canvas.getContext('2d');
+      ctx.drawImage(img,0,0);
+      var dataUrl=canvas.toDataURL('image/png');
+      _d('extractImageBase64','canvas_ok',true,{size:dataUrl.length});
+      var dbg=_flush();
+      return Promise.resolve({ok:true, dataUrl:dataUrl, width:w, height:h, method:'canvas', debug:dbg});
+    }catch(e){
+      _d('extractImageBase64','canvas_tainted',false,{error:e.message||String(e)});
+    }
+
+    // Fallback: 页面内 fetch → blob → Base64
+    _d('extractImageBase64','fetch_fallback_start',true,{src:(img.src||'').slice(0,80)});
+    var debugSnapshot=_flush();
+    return fetch(img.src)
+      .then(function(r){
+        if(!r.ok) throw new Error('fetch_status_'+r.status);
+        return r.blob();
+      })
+      .then(function(blob){
+        return new Promise(function(resolve){
+          var reader=new FileReader();
+          reader.onloadend=function(){
+            _d('extractImageBase64','fetch_ok',true,{size:reader.result.length});
+            resolve({ok:true, dataUrl:reader.result, width:w, height:h, method:'fetch', debug:debugSnapshot.concat(_flush())});
+          };
+          reader.readAsDataURL(blob);
+        });
+      })
+      .catch(function(err){
+        _d('extractImageBase64','fetch_failed',false,{error:err.message||String(err)});
+        return {ok:false, error:'extract_failed', detail:err.message||String(err), debug:debugSnapshot.concat(_flush())};
+      });
+  }
+
   function probe(){
     _d('probe','start',true);
     var s=getStatus();
@@ -236,5 +300,5 @@
     return {log:_log.slice(), count:_log.length};
   }
 
-  window.GeminiOps = {probe, click, fillPrompt, getStatus, pollStatus, getLatestImage, downloadLatestImage, getDebugLog, selectors:S, version:'0.8.0'};
+  window.GeminiOps = {probe, click, fillPrompt, getStatus, pollStatus, getLatestImage, extractImageBase64, downloadLatestImage, getDebugLog, selectors:S, version:'0.9.0'};
 })();
