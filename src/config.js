@@ -9,8 +9,7 @@
  *   2. .env 文件（需调用方自行加载，如 dotenv）
  *   3. 代码默认值
  */
-import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 
 const env = process.env;
 
@@ -44,11 +43,8 @@ const config = {
   /** CDP 远程调试端口 */
   browserDebugPort: envInt('BROWSER_DEBUG_PORT', 9222),
 
-  /** 浏览器用户数据目录 */
-  browserUserDataDir: envStr(
-    'BROWSER_USER_DATA_DIR',
-    join(homedir(), '.gemini-skill', 'browser-data'),
-  ),
+  /** 浏览器用户数据目录（不设则自动解析，见 browser.js resolveUserDataDir） */
+  browserUserDataDir: envStr('BROWSER_USER_DATA_DIR', undefined),
 
   /** 是否无头模式 */
   browserHeadless: envBool('BROWSER_HEADLESS', false),

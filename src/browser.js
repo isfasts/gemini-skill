@@ -16,8 +16,10 @@ import puppeteerCore from 'puppeteer-core';
 import { addExtra } from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { createConnection } from 'node:net';
-import { existsSync } from 'node:fs';
-import { platform } from 'node:os';
+import { existsSync, mkdirSync } from 'node:fs';
+import { platform, homedir } from 'node:os';
+import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import config from './config.js';
 
 // ── 用 puppeteer-extra 包装 puppeteer-core，注入 stealth 插件 ──
@@ -89,6 +91,120 @@ function detectBrowser() {
   }
 
   return undefined;
+}
+
+// ── userDataDir 兜底目录 ──
+const SKILL_FALLBACK_DATA_DIR = join(homedir(), '.gemini-skill', 'browser-data');
+
+/**
+ * 尝试从 OpenClaw 获取 userDataDir
+ *
+ * 执行: openclaw browser --browser-profile openclaw status --json
+ * 解析返回的 JSON 中的 userDataDir 字段
+ *
+ * @returns {string | undefined}
+ */
+function getOpenClawUserDataDir() {
+  try {
+    const stdout = execFileSync('openclaw', [
+      'browser', '--browser-profile', 'openclaw', 'status', '--json',
+    ], { timeout: 5000, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
+
+    const json = JSON.parse(stdout);
+    if (json.userDataDir && typeof json.userDataDir === 'string') {
+      console.log('[browser] got userDataDir from OpenClaw:', json.userDataDir);
+      return json.userDataDir;
+    }
+  } catch {
+    // openclaw 不存在或执行失败，静默跳过
+  }
+  return undefined;
+}
+
+/**
+ * 获取浏览器默认 userDataDir 路径（不同浏览器/平台）
+ *
+ * @returns {string | undefined}
+ */
+function getDefaultBrowserDataDir() {
+  const os = platform();
+  const home = homedir();
+
+  const candidates = [];
+
+  if (os === 'win32') {
+    const localAppData = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local');
+    candidates.push(
+      join(localAppData, 'Google', 'Chrome', 'User Data'),
+      join(localAppData, 'Microsoft', 'Edge', 'User Data'),
+      join(localAppData, 'Chromium', 'User Data'),
+    );
+  } else if (os === 'darwin') {
+    const lib = join(home, 'Library', 'Application Support');
+    candidates.push(
+      join(lib, 'Google', 'Chrome'),
+      join(lib, 'Microsoft Edge'),
+      join(lib, 'Chromium'),
+    );
+  } else {
+    // Linux
+    candidates.push(
+      join(home, '.config', 'google-chrome'),
+      join(home, '.config', 'microsoft-edge'),
+      join(home, '.config', 'chromium'),
+    );
+  }
+
+  for (const dir of candidates) {
+    if (existsSync(dir)) {
+      console.log('[browser] found default browser data dir:', dir);
+      return dir;
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * 多级兜底解析 userDataDir
+ *
+ * 优先级：
+ *   1. 环境变量 BROWSER_USER_DATA_DIR（config 已处理）
+ *   2. OpenClaw 运行状态中的 userDataDir
+ *   3. 浏览器默认 userDataDir（Chrome > Edge > Chromium）
+ *   4. Skill 内部创建 ~/.gemini-skill/browser-data（兜底 + warning）
+ *
+ * @returns {string}
+ */
+function resolveUserDataDir() {
+  // 1. 环境变量（已由 config 读取）
+  if (config.browserUserDataDir) {
+    return config.browserUserDataDir;
+  }
+
+  // 2. OpenClaw
+  const openclawDir = getOpenClawUserDataDir();
+  if (openclawDir) {
+    return openclawDir;
+  }
+
+  // 3. 浏览器默认目录
+  const defaultDir = getDefaultBrowserDataDir();
+  if (defaultDir) {
+    return defaultDir;
+  }
+
+  // 4. Skill 兜底
+  console.warn(
+    `[browser] ⚠ 未找到任何已有的 userDataDir，将使用 skill 内部目录：${SKILL_FALLBACK_DATA_DIR}\n` +
+    `  建议通过以下方式指定：\n` +
+    `  - 设置环境变量 BROWSER_USER_DATA_DIR\n` +
+    `  - 安装 OpenClaw 并配置 browser profile`
+  );
+  if (!existsSync(SKILL_FALLBACK_DATA_DIR)) {
+    mkdirSync(SKILL_FALLBACK_DATA_DIR, { recursive: true });
+  }
+  return SKILL_FALLBACK_DATA_DIR;
 }
 
 /**
@@ -225,10 +341,13 @@ async function findOrCreateGeminiPage(browser) {
  *   2. 检查端口是否有浏览器 → connect
  *   3. 否则自动检测 / 使用配置的路径启动浏览器
  *
+ * userDataDir 解析优先级：
+ *   opts.userDataDir > env BROWSER_USER_DATA_DIR > OpenClaw > 浏览器默认 > skill 兜底
+ *
  * @param {object} [opts]
- * @param {string} [opts.executablePath] - 浏览器路径（仅 launch 时需要，不传则自动检测）
+ * @param {string} [opts.executablePath] - 浏览器路径（不传则自动检测）
  * @param {number} [opts.port] - 调试端口（env: BROWSER_DEBUG_PORT，默认 9222）
- * @param {string} [opts.userDataDir] - 用户数据目录（env: BROWSER_USER_DATA_DIR）
+ * @param {string} [opts.userDataDir] - 用户数据目录（env: BROWSER_USER_DATA_DIR，不传则多级兜底）
  * @param {boolean} [opts.headless] - 无头模式（env: BROWSER_HEADLESS，默认 false）
  * @returns {Promise<{browser: import('puppeteer-core').Browser, page: import('puppeteer-core').Page}>}
  */
@@ -236,7 +355,7 @@ export async function ensureBrowser(opts = {}) {
   const {
     executablePath = config.browserPath,
     port = config.browserDebugPort,
-    userDataDir = config.browserUserDataDir,
+    userDataDir = resolveUserDataDir(),
     headless = config.browserHeadless,
   } = opts;
 
