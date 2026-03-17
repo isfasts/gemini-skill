@@ -20,7 +20,7 @@ import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createGeminiSession, disconnect } from './index.js';
 
-const prompt = '你好呀~请给我画一张植物大战僵尸的漫画，左侧是豌豆射手，右侧是僵尸。僵尸面对豌豆射手的攻击仓皇逃窜！';
+const prompt = 'Gemini你好！请你调用画图模型给我画一张洛天依的可爱Q版表情包~';
 
 // ── Demo 专用：杀掉所有 Chromium 系浏览器进程 ──
 function killAllBrowserProcesses() {

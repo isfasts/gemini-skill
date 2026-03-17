@@ -465,10 +465,15 @@ export function createOps(page) {
     },
 
     /**
-     * 提取指定图片的 Base64 数据（Canvas 优先，fetch 兜底）
+     * 提取指定图片的 Base64 数据
+     *
+     * 三级降级策略：
+     *   1. Canvas — 同步提取，最快（但跨域图片会被 taint）
+     *   2. 页面 fetch — 异步读取 blob（受 CORS 限制，Google 图片通常不可用）
+     *   3. CDP Network — 通过 CDP 协议用浏览器网络栈下载，绕过 CORS，终极兜底
      *
      * @param {string} url - 目标图片的 src URL
-     * @returns {Promise<{ok: boolean, dataUrl?: string, width?: number, height?: number, method?: 'canvas'|'fetch', error?: string}>}
+     * @returns {Promise<{ok: boolean, dataUrl?: string, width?: number, height?: number, method?: 'canvas'|'fetch'|'cdp', error?: string}>}
      */
     async extractImageBase64(url) {
       if (!url) {
@@ -477,8 +482,8 @@ export function createOps(page) {
       }
       console.log(`[extractImageBase64] 🔍 开始提取, url=${url.slice(0, 120)}...`);
 
+      // ── 阶段 1: Canvas 提取 ──
       const canvasResult = await op.query((targetUrl) => {
-        // ── 在页面中根据 url 查找匹配的 img 元素 ──
         const imgs = [...document.querySelectorAll('img.image.loaded')];
         const img = imgs.find(i => i.src === targetUrl);
         if (!img) {
@@ -487,7 +492,6 @@ export function createOps(page) {
         const w = img.naturalWidth || img.width;
         const h = img.naturalHeight || img.height;
 
-        // ── 尝试 Canvas 同步提取 ──
         try {
           const canvas = document.createElement('canvas');
           canvas.width = w;
@@ -496,8 +500,7 @@ export function createOps(page) {
           const dataUrl = canvas.toDataURL('image/png');
           return { ok: true, dataUrl, width: w, height: h, method: 'canvas' };
         } catch (e) {
-          // canvas tainted（跨域图片），记录原因后降级
-          return { ok: false, needFetch: true, src: img.src, width: w, height: h, canvasError: e.message || String(e) };
+          return { ok: false, needFallback: true, src: img.src, width: w, height: h, canvasError: e.message || String(e) };
         }
       }, url);
 
@@ -506,41 +509,89 @@ export function createOps(page) {
         return canvasResult;
       }
 
-      if (!canvasResult.needFetch) {
-        // img 元素都没找到，直接返回失败
+      if (!canvasResult.needFallback) {
         console.warn(`[extractImageBase64] ❌ 页面中未找到匹配的 img 元素 (已扫描 ${canvasResult.searched || 0} 张)`);
         return canvasResult;
       }
 
-      // ── Fetch 降级：Canvas 被跨域污染，改用 fetch 读取二进制 ──
-      console.log(`[extractImageBase64] ⚠ Canvas 被污染 (${canvasResult.canvasError})，降级为 fetch...`);
+      console.log(`[extractImageBase64] ⚠ Canvas 被污染 (${canvasResult.canvasError})，尝试页面 fetch...`);
 
-      const fetchResult = await page.evaluate(async (src, w, h) => {
+      // ── 阶段 2: 页面 fetch（可能被 CORS 拦截） ──
+      const fetchResult = await page.evaluate(async (src) => {
         try {
           const r = await fetch(src);
           if (!r.ok) return { ok: false, error: `fetch_status_${r.status}` };
           const blob = await r.blob();
+          const mime = blob.type || 'image/png';
           return await new Promise((resolve) => {
             const reader = new FileReader();
-            reader.onloadend = () => resolve({
-              ok: true, dataUrl: reader.result, width: w, height: h, method: 'fetch',
-            });
-            reader.onerror = () => resolve({
-              ok: false, error: 'filereader_error',
-            });
+            reader.onloadend = () => resolve({ ok: true, dataUrl: reader.result, mime });
+            reader.onerror = () => resolve({ ok: false, error: 'filereader_error' });
             reader.readAsDataURL(blob);
           });
         } catch (err) {
           return { ok: false, error: 'fetch_failed', detail: err.message || String(err) };
         }
-      }, canvasResult.src, canvasResult.width, canvasResult.height);
+      }, canvasResult.src);
 
       if (fetchResult.ok) {
-        console.log(`[extractImageBase64] ✅ Fetch 提取成功 (${fetchResult.width}x${fetchResult.height})`);
-      } else {
-        console.warn(`[extractImageBase64] ❌ Fetch 提取失败: ${fetchResult.error}${fetchResult.detail ? ' — ' + fetchResult.detail : ''}`);
+        console.log(`[extractImageBase64] ✅ 页面 fetch 提取成功 (${canvasResult.width}x${canvasResult.height})`);
+        return { ...fetchResult, width: canvasResult.width, height: canvasResult.height, method: 'fetch' };
       }
-      return fetchResult;
+
+      console.log(`[extractImageBase64] ⚠ 页面 fetch 失败 (${fetchResult.error}${fetchResult.detail ? ' — ' + fetchResult.detail : ''})，降级为 CDP 网络请求...`);
+
+      // ── 阶段 3: CDP Network.loadNetworkResource（终极兜底，绕过 CORS） ──
+      try {
+        const client = page._client();
+        const frameId = page.mainFrame()._id;
+
+        console.log(`[extractImageBase64] 📡 CDP 请求中... frameId=${frameId}`);
+        const { resource } = await client.send('Network.loadNetworkResource', {
+          frameId,
+          url: canvasResult.src,
+          options: { disableCache: false, includeCredentials: true },
+        });
+
+        if (!resource.success) {
+          const errMsg = `CDP 请求失败: httpStatusCode=${resource.httpStatusCode || 'N/A'}`;
+          console.warn(`[extractImageBase64] ❌ ${errMsg}`);
+          return { ok: false, error: 'cdp_request_failed', detail: errMsg };
+        }
+
+        // 通过 IO.read 读取 stream 数据
+        const streamHandle = resource.stream;
+        if (!streamHandle) {
+          console.warn('[extractImageBase64] ❌ CDP 返回无 stream handle');
+          return { ok: false, error: 'cdp_no_stream' };
+        }
+
+        const chunks = [];
+        let eof = false;
+        while (!eof) {
+          const { data, base64Encoded, eof: done } = await client.send('IO.read', {
+            handle: streamHandle,
+            size: 1024 * 1024, // 每次读 1MB
+          });
+          if (data) {
+            chunks.push(base64Encoded ? data : Buffer.from(data).toString('base64'));
+          }
+          eof = done;
+        }
+        await client.send('IO.close', { handle: streamHandle });
+
+        const base64Full = chunks.join('');
+        // 从 response headers 推断 MIME；CDP 有时不提供，默认用 image/png
+        const mime = (resource.headers?.['content-type'] || resource.headers?.['Content-Type'] || 'image/png').split(';')[0].trim();
+        const dataUrl = `data:${mime};base64,${base64Full}`;
+
+        console.log(`[extractImageBase64] ✅ CDP 提取成功 (${canvasResult.width}x${canvasResult.height}, mime=${mime}, size=${(base64Full.length * 0.75 / 1024).toFixed(1)}KB)`);
+        return { ok: true, dataUrl, width: canvasResult.width, height: canvasResult.height, method: 'cdp' };
+      } catch (err) {
+        const errMsg = err.message || String(err);
+        console.warn(`[extractImageBase64] ❌ CDP 提取异常: ${errMsg}`);
+        return { ok: false, error: 'cdp_error', detail: errMsg };
+      }
     },
 
     /**
