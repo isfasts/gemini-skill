@@ -374,6 +374,34 @@ server.registerTool(
   }
 );
 
+// ─── 登录状态检查 ───
+
+server.registerTool(
+  "gemini_check_login",
+  {
+    description: "检查当前 Gemini 页面是否已登录 Google 账号",
+    inputSchema: {},
+  },
+  async () => {
+    try {
+      const { ops } = await createGeminiSession();
+      const result = await ops.checkLogin();
+      disconnect();
+
+      if (!result.ok) {
+        return { content: [{ type: "text", text: `检测失败: ${result.error}` }], isError: true };
+      }
+
+      const status = result.loggedIn ? "已登录" : "未登录";
+      return {
+        content: [{ type: "text", text: `${status}（导航栏文本: "${result.barText}"）` }],
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `执行崩溃: ${err.message}` }], isError: true };
+    }
+  }
+);
+
 // ─── 页面状态 & 恢复 ───
 
 server.registerTool(

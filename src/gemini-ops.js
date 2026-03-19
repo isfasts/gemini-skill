@@ -921,4 +921,28 @@ function isImageLoaded(op) {
   });
 }
 
+/**
+ * 检查是否已登录 Google 账号
+ *
+ * 判断依据：顶部导航栏 div.boqOnegoogleliteOgbOneGoogleBar 的 innerText
+ * 包含"登录"或"sign in"（不区分大小写）则视为未登录
+ *
+ * @param {ReturnType<typeof createOperator>} op
+ * @returns {Promise<{ok: boolean, loggedIn: boolean, barText?: string, error?: string}>}
+ */
+function isLoggedIn(op) {
+  return op.query(() => {
+    const bar = document.querySelector('div.boqOnegoogleliteOgbOneGoogleBar');
+    if (!bar) {
+      return { ok: false, loggedIn: false, error: 'login_bar_not_found' };
+    }
+
+    const text = (bar.innerText || '').trim();
+    const lower = text.toLowerCase();
+    const notLoggedIn = lower.includes('登录') || lower.includes('sign in');
+
+    return { ok: true, loggedIn: !notLoggedIn, barText: text };
+  });
+}
+
 
