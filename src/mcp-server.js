@@ -43,10 +43,17 @@ server.registerTool(
         };
       }
       // 需要先处理新建会话（如果需要），因为 generateImage 内部的 newChat 会在上传之后才执行
-        if (newSession) {
+      if (newSession) {
           await ops.click('newChatBtn');
           await sleep(250);
-        }
+      }
+
+      // 确保是pro会话
+      const modelCheck = await ops.checkModel();
+      if (!modelCheck.ok || modelCheck.model !== 'pro') {
+        await ops.switchToModel('pro');
+        console.error(`[mcp] 已切换至 pro 模型`);
+      }
 
       // 如果有参考图，先上传
       if (referenceImages.length > 0) {
@@ -65,7 +72,7 @@ server.registerTool(
 
       // 如果上传了参考图且已手动新建会话，则 generateImage 内部不再新建
       const needNewChat = referenceImages.length > 0 ? false : newSession;
-      const result = await ops.generateImage(prompt, { newChat: needNewChat });
+      const result = await ops.generateImage(prompt, { newChat: needNewChat, fullSize });
 
       // 执行完毕立刻断开，交还给 Daemon 倒计时
       disconnect();
@@ -77,7 +84,17 @@ server.registerTool(
         };
       }
 
-      // 将 base64 写入本地文件
+      // 完整尺寸下载模式：文件已由 CDP 保存到 outputDir
+      if (result.method === 'fullSize') {
+        console.error(`[mcp] 完整尺寸图片已保存至 ${result.filePath}`);
+        return {
+          content: [
+            { type: "text", text: `图片生成成功！完整尺寸原图已保存至: ${result.filePath}` },
+          ],
+        };
+      }
+
+      // 低分辨率模式：base64 提取，写入本地文件
       const base64Data = result.dataUrl.split(',')[1];
       const mimeMatch = result.dataUrl.match(/^data:(image\/\w+);/);
       const ext = mimeMatch ? mimeMatch[1].split('/')[1] : 'png';
@@ -324,6 +341,40 @@ server.registerTool(
           { type: "text", text: `图片提取成功，已保存至: ${filePath}` },
           { type: "image", data: base64Data, mimeType: mimeMatch ? mimeMatch[1] : "image/png" },
         ],
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `执行崩溃: ${err.message}` }], isError: true };
+    }
+  }
+);
+
+// ─── 完整尺寸图片下载 ───
+
+server.registerTool(
+  "gemini_download_full_size_image",
+  {
+    description: "下载完整尺寸的图片（高清大图）。默认下载最新一张，也可通过 index 指定第几张（从0开始，从旧到新排列）",
+    inputSchema: {
+      index: z.number().int().min(0).optional().describe(
+        "图片索引，从0开始，按从旧到新排列。不传则下载最新一张"
+      ),
+    },
+  },
+  async ({ index }) => {
+    try {
+      const { ops } = await createGeminiSession();
+      const result = await ops.downloadFullSizeImage({ index });
+      disconnect();
+
+      if (!result.ok) {
+        let msg = `下载完整尺寸图片失败: ${result.error}`;
+        if (result.total != null) msg += `（共 ${result.total} 张图片）`;
+        if (result.error === 'index_out_of_range') msg += `，请求的索引: ${result.requestedIndex}`;
+        return { content: [{ type: "text", text: msg }], isError: true };
+      }
+
+      return {
+        content: [{ type: "text", text: `完整尺寸图片已下载（第 ${result.index + 1} 张，共 ${result.total} 张）\n文件路径: ${result.filePath}\n原始文件名: ${result.suggestedFilename || '未知'}` }],
       };
     } catch (err) {
       return { content: [{ type: "text", text: `执行崩溃: ${err.message}` }], isError: true };

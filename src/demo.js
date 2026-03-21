@@ -94,45 +94,45 @@ async function main() {
       }
       console.log(`[6] 图片加载完成 (${Date.now() - imgLoadStart}ms)`);
 
-      // 7. 获取最新图片并保存到本地
-      console.log('\n[7] 查找最新生成的图片...');
+      // 7. 下载完整尺寸的图片（通过 CDP 拦截下载到 outputDir）
+      console.log('\n[7] 下载完整尺寸图片...');
+      const dlResult = await ops.downloadFullSizeImage();
+      if (dlResult.ok) {
+        console.log(`[7] ✅ 完整尺寸图片已保存: ${dlResult.filePath} (原始文件名: ${dlResult.suggestedFilename})`);
+      } else {
+        console.warn(`[7] ⚠ 完整尺寸下载失败: ${dlResult.error}，回退到 base64 提取...`);
 
-      const imgInfo = await ops.getLatestImage();
-      console.log('imgInfo:', JSON.stringify(imgInfo, null, 2));
+        // 回退：用 base64 提取
+        const imgInfo = await ops.getLatestImage();
+        if (imgInfo.ok && imgInfo.src) {
+          console.log(`[7] 找到图片 (${imgInfo.width}x${imgInfo.height}, isNew=${imgInfo.isNew})`);
+          const b64Result = await ops.extractImageBase64(imgInfo.src);
 
-      if (imgInfo.ok && imgInfo.src) {
-        console.log(`[7] 找到图片 (${imgInfo.width}x${imgInfo.height}, isNew=${imgInfo.isNew})`);
+          if (b64Result.ok && b64Result.dataUrl) {
+            const matches = b64Result.dataUrl.match(/^data:image\/(\w+);base64,(.+)$/);
+            if (matches) {
+              const ext = matches[1] === 'jpeg' ? 'jpg' : matches[1];
+              const base64Data = matches[2];
+              const buffer = Buffer.from(base64Data, 'base64');
 
-        // 提取 base64 数据
-        console.log(`[7] 提取图片数据 (src=${imgInfo.src})...`);
-        const b64Result = await ops.extractImageBase64(imgInfo.src);
+              const outputDir = './gemini-image';
+              if (!existsSync(outputDir)) {
+                mkdirSync(outputDir, { recursive: true });
+              }
+              const filename = `gemini_${Date.now()}.${ext}`;
+              const filepath = join(outputDir, filename);
 
-        if (b64Result.ok && b64Result.dataUrl) {
-          // dataUrl 格式: data:image/png;base64,iVBOR...
-          const matches = b64Result.dataUrl.match(/^data:image\/(\w+);base64,(.+)$/);
-          if (matches) {
-            const ext = matches[1] === 'jpeg' ? 'jpg' : matches[1];
-            const base64Data = matches[2];
-            const buffer = Buffer.from(base64Data, 'base64');
-
-            // 保存到 ./gemini-image/
-            const outputDir = './gemini-image';
-            if (!existsSync(outputDir)) {
-              mkdirSync(outputDir, { recursive: true });
+              writeFileSync(filepath, buffer);
+              console.log(`[7] ✅ 图片已保存(base64回退): ${filepath} (${(buffer.length / 1024).toFixed(1)} KB, method=${b64Result.method})`);
+            } else {
+              console.warn('[7] ⚠ dataUrl 格式无法解析');
             }
-            const filename = `gemini_${Date.now()}.${ext}`;
-            const filepath = join(outputDir, filename);
-
-            writeFileSync(filepath, buffer);
-            console.log(`[7] ✅ 图片已保存: ${filepath} (${(buffer.length / 1024).toFixed(1)} KB, method=${b64Result.method})`);
           } else {
-            console.warn('[7] ⚠ dataUrl 格式无法解析');
+            console.warn(`[7] ⚠ 提取图片数据失败: ${b64Result.error || 'unknown'}`);
           }
         } else {
-          console.warn(`[7] ⚠ 提取图片数据失败: ${b64Result.error || 'unknown'}`);
+          console.log('[7] 未找到图片（可能本次回答不含图片）');
         }
-      } else {
-        console.log('[7] 未找到图片（可能本次回答不含图片）');
       }
     }
 

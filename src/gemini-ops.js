@@ -7,6 +7,8 @@
  */
 import { createOperator } from './operator.js';
 import { sleep } from './util.js';
+import config from './config.js';
+import { mkdirSync } from 'node:fs';
 
 // ── Gemini 页面元素选择器 ──
 const SELECTORS = {
@@ -691,6 +693,131 @@ export function createOps(page) {
       });
     },
 
+    /**
+     * 下载完整尺寸的图片
+     *
+     * 流程：
+     *   1. 定位目标图片，获取坐标用于 hover
+     *   2. 通过 CDP Browser.setDownloadBehavior 将下载目录重定向到 config.outputDir
+     *   3. hover 触发工具栏 → 点击"下载完整尺寸"按钮
+     *   4. 监听 CDP Browser.downloadWillBegin / Browser.downloadProgress 等待下载完成
+     *   5. 返回实际保存的文件路径
+     *
+     * 按钮选择器：button[data-test-id="download-enhanced-image-button"]
+     *
+     * @param {object} [options]
+     * @param {number} [options.index] - 图片索引（从0开始，从旧到新），不传则取最新一张
+     * @param {number} [options.timeout=30000] - 下载超时时间（ms）
+     * @returns {Promise<{ok: boolean, filePath?: string, suggestedFilename?: string, src?: string, index?: number, total?: number, error?: string}>}
+     */
+    async downloadFullSizeImage({ index, timeout = 30_000 } = {}) {
+      // 1. 定位目标图片，获取其坐标用于 hover
+      const imgInfo = await op.query((targetIndex) => {
+        const imgs = [...document.querySelectorAll('img.image.loaded')];
+        if (!imgs.length) return { ok: false, error: 'no_loaded_images', total: 0 };
+
+        const i = targetIndex == null ? imgs.length - 1 : targetIndex;
+        if (i < 0 || i >= imgs.length) {
+          return { ok: false, error: 'index_out_of_range', total: imgs.length, requestedIndex: i };
+        }
+
+        const img = imgs[i];
+        const rect = img.getBoundingClientRect();
+        return {
+          ok: true,
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+          src: img.src || '',
+          index: i,
+          total: imgs.length,
+        };
+      }, index);
+
+      if (!imgInfo.ok) return imgInfo;
+
+      // 2. 通过 CDP 设置下载路径到 config.outputDir
+      const downloadDir = config.outputDir;
+      mkdirSync(downloadDir, { recursive: true });
+
+      const client = page._client();
+      await client.send('Browser.setDownloadBehavior', {
+        behavior: 'allowAndName',
+        downloadPath: downloadDir,
+        eventsEnabled: true,
+      });
+
+      // 3. 设置下载监听（在点击前注册，避免遗漏事件）
+      const downloadPromise = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          client.off('Browser.downloadWillBegin', onBegin);
+          client.off('Browser.downloadProgress', onProgress);
+          reject(new Error('download_timeout'));
+        }, timeout);
+
+        let guid = null;
+        let suggestedFilename = null;
+
+        function onBegin(evt) {
+          guid = evt.guid;
+          suggestedFilename = evt.suggestedFilename || null;
+        }
+
+        function onProgress(evt) {
+          if (evt.guid !== guid) return;
+          if (evt.state === 'completed') {
+            clearTimeout(timer);
+            client.off('Browser.downloadWillBegin', onBegin);
+            client.off('Browser.downloadProgress', onProgress);
+            resolve({ suggestedFilename });
+          } else if (evt.state === 'canceled') {
+            clearTimeout(timer);
+            client.off('Browser.downloadWillBegin', onBegin);
+            client.off('Browser.downloadProgress', onProgress);
+            reject(new Error('download_canceled'));
+          }
+        }
+
+        client.on('Browser.downloadWillBegin', onBegin);
+        client.on('Browser.downloadProgress', onProgress);
+      });
+
+      // 4. hover 到图片上，触发工具栏显示
+      await page.mouse.move(imgInfo.x, imgInfo.y);
+      await sleep(250);
+
+      // 5. 点击"下载完整尺寸"按钮
+      const btnSelector = 'button[data-test-id="download-enhanced-image-button"]';
+      const clickResult = await op.click(btnSelector);
+
+      if (!clickResult.ok) {
+        return { ok: false, error: 'full_size_download_btn_not_found', src: imgInfo.src, index: imgInfo.index, total: imgInfo.total };
+      }
+
+      // 6. 等待下载完成
+      try {
+        const { suggestedFilename } = await downloadPromise;
+        const { join } = await import('node:path');
+        const filePath = join(downloadDir, suggestedFilename || `gemini_fullsize_${Date.now()}.png`);
+
+        return {
+          ok: true,
+          filePath,
+          suggestedFilename,
+          src: imgInfo.src,
+          index: imgInfo.index,
+          total: imgInfo.total,
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err.message,
+          src: imgInfo.src,
+          index: imgInfo.index,
+          total: imgInfo.total,
+        };
+      }
+    },
+
     // ─── 高层组合操作 ───
 
     /**
@@ -829,11 +956,11 @@ export function createOps(page) {
      * @param {object} [opts]
      * @param {number} [opts.timeout=120000]
      * @param {boolean} [opts.newChat=true]
-     * @param {boolean} [opts.highRes=false]
+     * @param {boolean} [opts.fullSize=false] - true 时通过 CDP 拦截下载完整尺寸原图到 outputDir；false 时提取页面预览图 base64
      * @param {(status: object) => void} [opts.onPoll]
      */
     async generateImage(prompt, opts = {}) {
-      const { timeout = 120_000, newChat = true, highRes = false, onPoll } = opts;
+      const { timeout = 120_000, newChat = true, fullSize = false, onPoll } = opts;
 
       // 1. 可选：新建会话
       if (newChat) {
@@ -864,10 +991,12 @@ export function createOps(page) {
       }
 
       // 5. 提取 / 下载
-      if (highRes) {
-        const dlResult = await this.downloadLatestImage();
-        return { ok: dlResult.ok, method: 'download', elapsed: waitResult.elapsed, ...dlResult };
+      if (fullSize) {
+        // 完整尺寸下载：通过 CDP 拦截，文件保存到 config.outputDir
+        const dlResult = await this.downloadFullSizeImage();
+        return { ok: dlResult.ok, method: 'fullSize', elapsed: waitResult.elapsed, ...dlResult };
       } else {
+        // 低分辨率：提取页面预览图的 base64
         const b64Result = await this.extractImageBase64(imgInfo.src);
         return { ok: b64Result.ok, method: b64Result.method, elapsed: waitResult.elapsed, ...b64Result };
       }
