@@ -639,7 +639,11 @@ export function createOps(page) {
           return { ok: false, error: 'cdp_no_stream' };
         }
 
-        const chunks = [];
+        // 【关键修复】：CDP IO.read 分块返回的 base64 不能直接拼接字符串！
+        // 每个 chunk 是独立编码的 base64，末尾可能有 '=' 填充符，
+        // 直接 join 会导致中间插入非法字符 → 解码后数据损坏。
+        // 正确做法：先把每个 chunk 解码为 Buffer，拼接 Buffer，最后统一编码。
+        const bufferChunks = [];
         let eof = false;
         while (!eof) {
           const { data, base64Encoded, eof: done } = await client.send('IO.read', {
@@ -647,13 +651,14 @@ export function createOps(page) {
             size: 1024 * 1024, // 每次读 1MB
           });
           if (data) {
-            chunks.push(base64Encoded ? data : Buffer.from(data).toString('base64'));
+            bufferChunks.push(base64Encoded ? Buffer.from(data, 'base64') : Buffer.from(data));
           }
           eof = done;
         }
         await client.send('IO.close', { handle: streamHandle });
 
-        const base64Full = chunks.join('');
+        const fullBuffer = Buffer.concat(bufferChunks);
+        const base64Full = fullBuffer.toString('base64');
         // 从 response headers 推断 MIME；CDP 有时不提供，默认用 image/png
         const mime = (resource.headers?.['content-type'] || resource.headers?.['Content-Type'] || 'image/png').split(';')[0].trim();
         const dataUrl = `data:${mime};base64,${base64Full}`;
@@ -743,7 +748,7 @@ export function createOps(page) {
       if (!scrollResult.ok) return scrollResult;
 
       // 1b. 等待滚动和重排完成后，再获取准确的坐标
-      await sleep(250);
+      await sleep(500);
 
       const imgInfo = await op.query((targetIndex) => {
         const imgs = [...document.querySelectorAll('img.image.loaded')];
@@ -811,12 +816,16 @@ export function createOps(page) {
       });
 
       // 4. hover 到图片上，触发工具栏显示
+      console.log(`[downloadFullSizeImage] hover 到 (${imgInfo.x}, ${imgInfo.y})...`);
       await page.mouse.move(imgInfo.x, imgInfo.y);
-      await sleep(500);
+      await sleep(800);
 
       // 5. 点击"下载完整尺寸"按钮（带重试：hover 可能需要更长时间触发工具栏）
       const btnSelector = 'button[data-test-id="download-generated-image-button"]';
-      const clickResult = await op.click(btnSelector);
+
+      // 先检查按钮是否出现
+      let clickResult = await op.click(btnSelector);
+      console.log(`[downloadFullSizeImage] 第1次点击下载按钮: ok=${clickResult.ok}, error=${clickResult.error || 'none'}`);
 
       if (!clickResult.ok) {
         return { ok: false, error: 'full_size_download_btn_not_found', src: imgInfo.src, index: imgInfo.index, total: imgInfo.total };
