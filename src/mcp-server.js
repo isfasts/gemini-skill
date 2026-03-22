@@ -91,10 +91,14 @@ server.registerTool(
         console.error(`[mcp] ${referenceImages.length} 张参考图上传完成`);
       }
 
-      // 如果有参考图，已在上面手动新建会话，generateImage 内部不再新建
-      // 如果没有参考图，newSession 直接传给 generateImage 内部处理
-      const needNewChat = referenceImages.length > 0 ? false : newSession;
-      const result = await ops.generateImage(prompt, { newChat: needNewChat, fullSize, timeout });
+
+      // 新建会话（如需）
+      if (newSession) {
+        await ops.click('newChatBtn');
+        await sleep(250);
+      }
+
+      const result = await ops.generateImage(prompt, { fullSize, timeout });
 
       // 执行完毕立刻断开，交还给 Daemon 倒计时
       disconnect();
@@ -106,8 +110,8 @@ server.registerTool(
         };
       }
 
-      // 完整尺寸下载模式：文件已由 CDP 保存到 outputDir
-      if (result.method === 'fullSize') {
+      if (fullSize) {
+        // 完整尺寸下载模式：文件已由 CDP 保存到 outputDir，失败则直接报错
         console.error(`[mcp] 完整尺寸图片已保存至 ${result.filePath}`);
         return {
           content: [

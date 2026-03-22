@@ -824,9 +824,15 @@ export function createOps(page) {
       // 5. 点击"下载完整尺寸"按钮（带重试：hover 可能需要更长时间触发工具栏）
       const btnSelector = 'button[data-test-id="download-generated-image-button"]';
 
-      // 先检查按钮是否出现
-      let clickResult = await op.click(btnSelector);
-      console.log(`[downloadFullSizeImage] 第1次点击下载按钮: ok=${clickResult.ok}, error=${clickResult.error || 'none'}`);
+      let clickResult;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        clickResult = await op.click(btnSelector);
+        if (clickResult.ok) break;
+        // 按钮还没出来，可能工具栏动画还没完成，再 hover 一次并多等一会儿
+        console.log(`[downloadFullSizeImage] 第${attempt}次点击下载按钮失败，重试 hover...`);
+        await page.mouse.move(imgInfo.x, imgInfo.y);
+        await sleep(500);
+      }
 
       if (!clickResult.ok) {
         return { ok: false, error: 'full_size_download_btn_not_found', src: imgInfo.src, index: imgInfo.index, total: imgInfo.total };
@@ -1025,27 +1031,18 @@ export function createOps(page) {
     },
 
     /**
-     * 完整生图流程：新建会话 → 发送提示词 → 等待 → 提取图片
+     * 完整生图流程：发送提示词 → 等待 → 提取图片
+     * 注意：新建会话、上传参考图等前置操作由调用方负责
      * @param {string} prompt
      * @param {object} [opts]
      * @param {number} [opts.timeout=120000]
-     * @param {boolean} [opts.newChat=true]
      * @param {boolean} [opts.fullSize=false] - true 时通过 CDP 拦截下载完整尺寸原图到 outputDir；false 时提取页面预览图 base64
      * @param {(status: object) => void} [opts.onPoll]
      */
     async generateImage(prompt, opts = {}) {
-      const { timeout = 120_000, newChat = true, fullSize = false, onPoll } = opts;
+      const { timeout = 120_000, fullSize = false, onPoll } = opts;
 
-      // 1. 可选：新建会话
-      if (newChat) {
-        const newChatResult = await this.click('newChatBtn');
-        if (!newChatResult.ok) {
-          console.warn('[ops] newChatBtn click failed, continuing anyway');
-        }
-        await sleep(1500);
-      }
-
-      // 2. 发送并等待
+      // 1. 发送并等待
       const waitResult = await this.sendAndWait(prompt, { timeout, onPoll });
       if (!waitResult.ok) {
         return { ...waitResult, step: 'sendAndWait' };
