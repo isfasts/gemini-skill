@@ -197,6 +197,9 @@ const BROWSER_ARGS = [
   '--disable-crash-reporter',
   '--hide-crash-restore-bubble',
   '--test-type',
+  // Windows Server 安全策略绕过：防止 Safe Browsing 验毒超时导致浏览器的下载被拦截
+  '--safebrowsing-disable-download-protection',
+  '--safebrowsing-disable-extension-blacklist',
 ];
 
 /** 端口探活 */

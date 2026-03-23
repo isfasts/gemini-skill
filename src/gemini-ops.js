@@ -771,12 +771,14 @@ export function createOps(page) {
       if (!imgInfo.ok) return imgInfo;
 
       // 2. 通过 CDP 设置下载路径到 config.outputDir
-      const downloadDir = config.outputDir;
+      //    用 resolve() 规范化路径，确保 Windows Server 上是标准反斜杠路径
+      const { resolve: pathResolve } = await import('node:path');
+      const downloadDir = pathResolve(config.outputDir);
       mkdirSync(downloadDir, { recursive: true });
 
       const client = page._client();
       await client.send('Browser.setDownloadBehavior', {
-        behavior: 'allowAndName',
+        behavior: 'allow',       // 不用 allowAndName，避免 GUID 临时文件被 Windows Server 安全策略拦截
         downloadPath: downloadDir,
         eventsEnabled: true,
       });
@@ -789,21 +791,18 @@ export function createOps(page) {
           reject(new Error('download_timeout'));
         }, timeout);
 
-        let guid = null;
         let suggestedFilename = null;
 
         function onBegin(evt) {
-          guid = evt.guid;
           suggestedFilename = evt.suggestedFilename || null;
         }
 
         function onProgress(evt) {
-          if (evt.guid !== guid) return;
           if (evt.state === 'completed') {
             clearTimeout(timer);
             client.off('Browser.downloadWillBegin', onBegin);
             client.off('Browser.downloadProgress', onProgress);
-            resolve({ suggestedFilename, guid });
+            resolve({ suggestedFilename });
           } else if (evt.state === 'canceled') {
             clearTimeout(timer);
             client.off('Browser.downloadWillBegin', onBegin);
@@ -839,27 +838,18 @@ export function createOps(page) {
       }
 
       // 6. 等待下载完成
-      //    allowAndName 模式下，Chrome 会把文件以 GUID 命名保存到 downloadDir，
-      //    真正的文件名在 downloadWillBegin 事件的 suggestedFilename 里。
-      //    下载完成后需要把 GUID 文件重命名为目标文件名。
+      //    allow 模式下，Chrome 直接用 suggestedFilename 保存到 downloadDir，无需重命名。
       try {
-        const { suggestedFilename, guid } = await downloadPromise;
+        const { suggestedFilename } = await downloadPromise;
         const { join } = await import('node:path');
-        const { renameSync, existsSync } = await import('node:fs');
+        const { existsSync } = await import('node:fs');
 
         const targetName = suggestedFilename || `gemini_fullsize_${Date.now()}.png`;
-        const guidPath = join(downloadDir, guid);
         const filePath = join(downloadDir, targetName);
 
-        // 将 GUID 文件重命名为正确的文件名
-        if (existsSync(guidPath)) {
-          renameSync(guidPath, filePath);
-          console.log(`[ops] 已重命名: ${guid} → ${targetName}`);
-        } else {
-          // 有些 Chrome 版本可能已经用 suggestedFilename 保存了，检查一下
-          if (!existsSync(filePath)) {
-            console.warn(`[ops] 下载文件未找到: 既不存在 ${guidPath} 也不存在 ${filePath}`);
-          }
+        if (!existsSync(filePath)) {
+          console.warn(`[ops] 下载文件未找到: ${filePath}`);
+          return { ok: false, error: 'downloaded_file_not_found', filePath, src: imgInfo.src, index: imgInfo.index, total: imgInfo.total };
         }
 
         // 去水印处理

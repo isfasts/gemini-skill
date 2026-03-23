@@ -165,7 +165,8 @@ export async function ensureBrowser() {
     acquireData = await res.json();
 
     if (!acquireData.ok) {
-      throw new Error(acquireData.error || 'Daemon 返回失败');
+      const detail = acquireData.detail ? ` (${acquireData.detail})` : '';
+      throw new Error(`${acquireData.error || 'Daemon 返回失败'}${detail}`);
     }
   } catch (err) {
     throw new Error(
